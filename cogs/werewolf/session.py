@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import random
 from typing import List, Dict, Optional, Union
@@ -16,17 +18,87 @@ from cogs.werewolf.roles import ROLES, Role
 
 
 class Player:
-    def __init__(self, player: qq.Member):
+    def __init__(self, player: qq.Member, session: Session):
         self.member = player
         self.role: Optional[Role] = MISSING
         self.cult_leader: bool = False
         self.dead: bool = False
+        self.role_model: Optional[Player] = MISSING
+        self.session: Session = session
 
     def __repr__(self):
         return f'<Player member={self.member}, role={self.role}, cult_leader={self.cult_leader}>'
 
     def set_role(self, role: Role):
         self.role = role
+
+    @property
+    def name(self):
+        return self.member.display_name
+
+    async def process_aps(self):
+        if not self.dead:
+            seer = self.session.get_player_with_role(ROLES.Seer)[0]
+            if seer.dead:
+                self.role = ROLES.Seer
+                await self.member.send(f"{seer.name} 曾是先知。作为学徒，你挺身而出，成为新一代先知。")
+                beholder = self.session.get_player_with_role(ROLES.Beholder)[0]
+                if beholder and not beholder.dead:
+                    await beholder.member.send(f"{self.name} 曾是先知的学徒，现在他代替 {seer.name} 成为新一代先知。")
+
+    async def process_wc(self):
+        if not self.dead and self.role_model.dead:
+            self.role = ROLES.Wolf
+            wolves = self.session.get_player_with_roles(ROLES.wolf.values())
+            for wolf in wolves:
+                if wolf.dead:
+                    continue
+                await wolf.member.send(f"{self.name} 的偶像死了，他成了狼人！")
+            await self.member.send(f"你的偶像 %s 死了！所以你成为了狼人！你的新队友是：\n") + '\n'.join(
+                [n.member.display_name for n in wolves if not n.dead]
+            )
+
+    async def process_dg(self):
+        if not self.dead and self.role_model.dead:
+            self.role = self.role_model.role
+            if self.role is ROLES.Mason:
+                masons = self.session.get_player_with_role(ROLES.Mason)
+                for mason in masons:
+                    if not mason.dead:
+                        await mason.member.send(f"替身 {self.name} 已变成共济会会员，一起互帮互助。")
+                return await self.member.send(
+                    f"你所选择的 {self.role_model.name} 已死，所以你变成了共济会会员。"
+                    f"你的队友（如果有的话）是 :" + '\n'.join([n.name for n in masons if not n.dead])
+                )
+            if self.role is ROLES.Seer:
+                beholder = self.session.get_player_with_role(ROLES.Beholder)[0]
+                if beholder and not beholder.dead:
+                    await beholder.member.send(f"{self.name} 曾是替身，现在他代替 {self.role_model.name} 成为新一代先知。")
+            if self.role in ROLES.wolf:
+                wolves = self.session.get_player_with_roles(ROLES.wolf.values())
+                for wolf in wolves:
+                    if wolf.dead:
+                        continue
+                    await wolf.member.send(f"替身 {self.name} 已变成{self.role.emoji}{self.role.name}，就像你一样。")
+                return await self.member.send(
+                    f"你所选择的 {self.role_model.name} 已死，所以你变成了{self.role.emoji}{self.role.name}。"
+                    f"你的队友（如果有的话）是: \n" + '\n'.join([n.member.display_name for n in wolves if not n.dead])
+                )
+            if self.role is ROLES.Cultist:
+                cultists = self.session.get_player_with_role(ROLES.Cultist)
+                for cultist in cultists:
+                    if cultist.dead:
+                        continue
+                    await cultist.member.send(f"替身 {self.name} 已变成邪教徒，就像你一样。")
+                return await self.member.send(
+                    f"你所选择的 {self.role_model.name} 已死，所以你变成了邪教徒。你的队友（如果有的话）是 :\n" + "\n".join(
+                        [n.member.display_name for n in cultists if not n.dead]
+                    )
+                )
+            return await self.member.send(
+                f"你所选择的 {self.role_model.name} 已死，所以你变成了{self.role.emoji}{self.role.name}" +
+                self.session.get_role_info(self.role)
+            )
 
 
 class Setting:
@@ -59,7 +131,7 @@ class Session:
 
     def join(self, player: Union[qq.Member, Player]):
         if not isinstance(player, Player):
-            player = Player(player)
+            player = Player(player, self)
         self.players[player.member.id] = player
 
     def leave(self, player: qq.Member):
@@ -95,11 +167,26 @@ class Session:
         while self.is_running:
             self.day += 1
 
-    async def check_role(self):
-        pass
+    async def check_role_changes(self):
+        aps = self.get_player_with_role(ROLES.ApprenticeSeer)[0]
+        if aps:
+            await aps.process_aps()
+
+        wc = self.get_player_with_role(ROLES.WildChild)[0]
+        if wc:
+            await wc.process_wc()
+
+        dg = self.get_player_with_role(ROLES.Doppelganger)[0]
+        if dg:
+            await dg.process_dg()
 
     def get_player_with_role(self, role: Role) -> List[Player]:
-        return [n for n in self.players.values() if n.role is role and not n.dead]
+        players = [n for n in self.players.values() if n.role is role]
+        return players if players else [None]
+
+    def get_player_with_roles(self, roles: List[Role]) -> List[Player]:
+        players = [n for n in self.players.values() if n.role in roles]
+        return players if players else [None]
 
     @property
     def player_count(self) -> int:
@@ -249,48 +336,47 @@ class Session:
             )
         return msg
 
-
 # if __name__ == '__main__':
-    #     import timeit
-    #     number = 10000
-    #     time = timeit.timeit(
-    #         'sess.assign_role()',
-    #         setup='''from __main__ import Session, Player, random
-    #
-    # class Dummy:
-    #     @property
-    #     def id(self):
-    #         return random.randint(0, 65565)
-    #
-    #     def __repr__(self):
-    #         return "<Dummy>"
-    #
-    # sess = Session(False)
-    # for n in range(16):
-    #     d = Dummy()
-    #     p = Player(d)
-    #     sess.join(p)
-    # ''',
-    #         number=number
-    #     )
-    #     print(time / number * 1000, 'ms per')
+#     import timeit
+#     number = 10000
+#     time = timeit.timeit(
+#         'sess.assign_role()',
+#         setup='''from __main__ import Session, Player, random
+#
+# class Dummy:
+#     @property
+#     def id(self):
+#         return random.randint(0, 65565)
+#
+#     def __repr__(self):
+#         return "<Dummy>"
+#
+# sess = Session(False)
+# for n in range(16):
+#     d = Dummy()
+#     p = Player(d)
+#     sess.join(p)
+# ''',
+#         number=number
+#     )
+#     print(time / number * 1000, 'ms per')
 
-    # class Dummy:
-    #     @property
-    #     def id(self):
-    #         return random.randint(0, 65565)
-    #
-    #     @property
-    #     def display_name(self):
-    #         return 'Bob_' + str(self.id)
-    #
-    #     def __repr__(self):
-    #         return "<Dummy>"
-    #
-    #
-    # sess = Session(True)
-    # for n in range(16):
-    #     d = Dummy()
-    #     p = Player(d)
-    #     sess.join(p)
-    # sess.assign_role()
+# class Dummy:
+#     @property
+#     def id(self):
+#         return random.randint(0, 65565)
+#
+#     @property
+#     def display_name(self):
+#         return 'Bob_' + str(self.id)
+#
+#     def __repr__(self):
+#         return "<Dummy>"
+#
+#
+# sess = Session(True)
+# for n in range(16):
+#     d = Dummy()
+#     p = Player(d)
+#     sess.join(p)
+# sess.assign_role()
