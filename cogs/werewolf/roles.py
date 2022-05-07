@@ -10,7 +10,9 @@ __all__ = (
     'ROLES'
 )
 
-Parties = Literal['Thief', 'Village', 'Wolf', 'Tanner', 'Cult', 'SerialKiller', 'Arsonist']
+Parties = Literal[
+    'Thief', 'Village', 'Wolf', 'Tanner', 'Cult', 'SerialKiller', 'Arsonist', "Lover", "Sorcerer", "Doppelganger"
+]
 Roles = Literal[
     'Villager', 'Drunk', 'Harlot', 'Seer', 'Traitor', 'GuardianAngel', 'Detective', 'Wolf', 'Cursed', 'Gunner',
     'Tanner', 'Fool', 'WildChild', 'Beholder', 'ApprenticeSeer', 'Cultist', 'CultistHunter', 'Mason', 'Doppelganger',
@@ -223,7 +225,7 @@ class _RoleSentinel:
               "如果选的是是孤儿，他和偶像死了，你会变成狼人。\n"
               "如果孤儿死了，但他的偶像没死，你会继承孤儿的身份和他的偶像；你在变身前不会被洗成邪教徒，但变身后可以被洗。\n"
               "如果到最后都没有变形，那你就输了（除了你和另外一人是情侣）。\n",
-        party="Village", bit=18, strength=2
+        party="Doppelganger", bit=18, strength=2
     )
     Cupid = Role(
         emoji="💘", name="爱神",
@@ -266,7 +268,7 @@ class _RoleSentinel:
         ],
         about="暗黑法师，是狼人阵营如同先知一样的存在，然而法力不足，只能探测出狼人和先知这两种身份，其他一概不知。",
         eaten="“不要吃我，我是你们的人！”晚上突然传来这样一句话。第二天， %s 被吃剩下的骨头被发现了。【暗黑法师🔮】被吃了。",
-        party="Wolf", bit=22, strength=2
+        party="Sorcerer", bit=22, strength=2
     )
     AlphaWolf = Role(
         emoji="⚡", name="头狼",
@@ -459,38 +461,44 @@ class _RoleSentinel:
 
     @property
     def village(self) -> Dict[Roles, Role]:
-        return {m: n for m, n in _RoleSentinel.__dict__.items() if isinstance(n, Role) and n.party == "Village"}
+        return {m: n for m, n in _RoleSentinel.__dict__.items() if isinstance(n, Role) and n.party in [
+            "Village", "Doppelganger"
+        ]}
 
     @property
     def wolf(self) -> Dict[Roles, Role]:
-        return {m: n for m, n in _RoleSentinel.__dict__.items() if isinstance(n, Role) and n.party == "Wolf"}
+        return {m: n for m, n in _RoleSentinel.__dict__.items() if isinstance(n, Role) and n.party in [
+            "Wolf", "Sorcerer"
+        ]}
 
     @property
     def not_wolf(self) -> Dict[Roles, Role]:
-        return {m: n for m, n in _RoleSentinel.__dict__.items() if isinstance(n, Role) and n.party != "Wolf"}
+        return {m: n for m, n in _RoleSentinel.__dict__.items() if isinstance(n, Role) and n.party not in [
+            "Wolf", "Sorcerer"
+        ]}
 
     @property
     def evil(self) -> Dict[Roles, Role]:
         return {m: n for m, n in _RoleSentinel.__dict__.items() if isinstance(n, Role) and n.party in [
-            "Wolf", 'Cult', 'SerialKiller', 'Arsonist'
+            "Wolf", 'Cult', 'SerialKiller', 'Arsonist', "Sorcerer"
         ]}
 
     @property
     def not_evil(self) -> Dict[Roles, Role]:
         return {m: n for m, n in _RoleSentinel.__dict__.items() if isinstance(n, Role) and n.party not in [
-            "Wolf", 'Cult', 'SerialKiller', 'Arsonist'
+            "Wolf", 'Cult', 'SerialKiller', 'Arsonist', "Sorcerer"
         ]}
 
     @property
     def not_evil_list(self) -> List[Role]:
         return [n for m, n in _RoleSentinel.__dict__.items() if isinstance(n, Role) and n.party not in [
-            "Wolf", 'Cult', 'SerialKiller', 'Arsonist'
+            "Wolf", 'Cult', 'SerialKiller', 'Arsonist', "Sorcerer"
         ]]
 
     @property
     def evil_list(self) -> List[Role]:
         return [n for m, n in _RoleSentinel.__dict__.items() if isinstance(n, Role) and n.party in [
-            "Wolf", 'Cult', 'SerialKiller', 'Arsonist'
+            "Wolf", 'Cult', 'SerialKiller', 'Arsonist', "Sorcerer"
         ]]
 
     @staticmethod
