@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import random
-from typing import List, Dict, Optional, Union, Set
+from typing import List, Dict, Optional, Union
 
 import qq
 
@@ -13,10 +13,10 @@ __all__ = (
 )
 
 from qq.ext import commands
-from qq.utils import MISSING, get, find
+from qq.utils import MISSING, get
 
 from cogs.werewolf.enum import WinType, KillMethod
-from cogs.werewolf.roles import ROLES, Role, Parties
+from cogs.werewolf.roles import ROLES, Role
 
 WOLF_ROLES = [ROLES.Wolf, ROLES.AlphaWolf, ROLES.WolfCub, ROLES.Lycan]
 
@@ -38,6 +38,7 @@ class Player:
         self.kill_by_role: Optional[Role] = MISSING
         self.kill_method: Optional[KillMethod] = MISSING
         self.final_shot_delay: Optional[KillMethod] = MISSING
+        self.converted_to_cult: bool = False
 
     def __repr__(self):
         return f'<Player member={self.member}, role={self.role}, cult_leader={self.cult_leader}>'
@@ -214,10 +215,19 @@ class Session:
                     traitor.role = ROLES.Wolf
                     traitor.changed_role_count += 1
                     await traitor.member.send("现在你已经成为狼人了，你这个叛徒！！！")
-        if len(survivor) == 2:
+        if not survivor:
+            return self.end(WinType.NoOne)
+        elif len(survivor) == 1:
+            p = survivor[0]
+            if p.role in [ROLES.Tanner, ROLES.Sorcerer, ROLES.Thief, ROLES.Doppelganger]:
+                return self.end(WinType.NoOne)
+            else:
+                return self.end(p.role.party)
+        elif len(survivor) == 2:
             if all(n.in_love for n in survivor):
                 return await self.end(WinType.Lovers)
-
+            if all(n in [ROLES.Tanner, ROLES.Sorcerer, ROLES.Thief, ROLES.Doppelganger] for n in survivor):
+                return self.end(WinType.NoOne)
             if any(n.role is ROLES.Hunter for n in survivor):
                 other = [n for n in survivor if n.role != ROLES.Hunter]
                 if not other:
@@ -235,15 +245,63 @@ class Session:
                         )
                         return await self.end(WinType.Village)
                     else:
-                        pass
+                        await self.ctx.send(
+                            f"知道只剩 🎯猎人{hunter.name} 了,🐺狼人 {other.name} 找到了一个好时机，趁机杀死了 {hunter.name}。 #狼人胜"
+                        )
+                        return await self.end(WinType.Wolf)
+            if any(n.role is ROLES.SerialKiller for n in survivor):
+                return self.end(WinType.SerialKiller)
+            if any(n.role is ROLES.Arsonist for n in survivor):
+                return self.end(WinType.Arsonist)
+            if any(n.role is ROLES.Cultist for n in survivor):
+                other = [n for n in survivor if n.role != ROLES.Cultist]
+                if not other:
+                    return await self.end(WinType.Cult)
+                else:
+                    other = other[0]
+                if other.role in WOLF_ROLES:
+                    return self.end(WinType.Wolf)
+                if other.role is ROLES.CultistHunter:
+                    cultist = get(survivor, role=ROLES.Cultist)
+                    await cultist.member.send(
+                        f"最后，村里只剩💂邪教捕手{other.name} 和 👤邪教徒 {cultist.name} 了..."
+                        f"可惜 {cultist.name} 最后的邪教仪式，还是被 {other.name} 发现了... #村民胜 "
+                    )
+                    await self.kill_player(cultist, KillMethod.HunterCult, other)
+                    return self.end(WinType.Villager)
+                other.converted_to_cult = True
+                other.role = ROLES.Cultist
+                return self.end(WinType.Cult)
+        elif len(survivor) == 3:
+            if all(n in [ROLES.Tanner, ROLES.Sorcerer, ROLES.Thief, ROLES.Doppelganger] for n in survivor):
+                return self.end(WinType.NoOne)
 
-        teams = {s.role.party for s in survivor}
-        if (
-                len(teams) in [1, 0] or
-                teams - {"Sorcerer"} == {"Wolf"} or
-                not (teams - {"Sorcerer", "Thief", "Tanner", "Doppelganger"})
+        if any(n.role.party in [ROLES.SerialKiller, ROLES.Arsonist] for n in survivor):
+            return False
+        if all(x.role.party == ROLES.Cultist for x in survivor):
+            return self.end(WinType.Cult)
+
+        wolfs = [n for n in survivor if n.role in ROLES.Wolf]
+        others = [n for n in survivor if n.role not in ROLES.Wolf]
+        if wolfs > others:
+            gunner = get(survivor, role=ROLES.Gunner)
+            if (
+                    gunner and gunner.bullet > 0 and
+                    (
+                            len(wolfs) == len(others) or
+                            (len(wolfs) == len(others) + 1 and len([n for n in wolfs if n.in_love]) == 2)
+                    )
+            ):
+                return False
+            return self.end(WinType.Wolf)
+        if all(
+                n.role not in [
+                    ROLES.SnowWolf, ROLES.Cultist, ROLES.SerialKiller, ROLES.Arsonist
+                ] + WOLF_ROLES for n in survivor
         ):
-            await self.end(teams)
+            if not check_bitten or all(n.bitten for n in survivor):
+                return self.end(WinType.Villager)
+        return False
 
     async def kill_player(
             self,
@@ -344,57 +402,106 @@ class Session:
                     f"{killed.name} 当场死亡。 {killed.role_description}"
                 )
             await self.kill_player(killed, KillMethod.HunterShot, killer=hunter, is_night=False)
+            await self.check_role_changes()
 
     async def end(self, teams: WinType):
-        msg = ""
         if not self.is_running:
-            return True
+            return False
         self.is_running = False
+        msg = ""
+
         self.end_time = datetime.datetime.now()
-
-        if len(teams) == 0:
-            msg += "所有人都死了，小镇上尸横遍野....秃譍在半空盘旋，兴奋长鸣... #无人胜\n"
-
-        if "Lover" in teams:
-            for ply in [n for n in self.players.values() if n.in_love]:
-                ply.win = True
+        if teams == WinType.Lovers:
+            lover = [n for n in self.players.values() if n.in_love]
+            for w in lover:
+                w.win = True
         else:
-            for ply in self.players.values():
-                if (
-                        (ply.role.party not in teams and not (ply.role is ROLES.Sorcerer and "Wolf" in teams)) or
-                        (ply.role in [ROLES.Arsonist, ROLES.SerialKiller] and ply.dead) or
-                        (ply.role is ROLES.Tanner and not ply.died_last_night)
-                ):
+            for k in self.players.values():
+                if k.role.party != teams:
+                    break
+                if teams in [WinType.SerialKiller, WinType.Arsonist]:
                     continue
 
-                ply.win = True
-                if ply.in_love:
-                    ply.in_love.win = True
+                if teams == WinType.Tanner and not k.died_last_night:
+                    continue
 
-        if all(x in ["Wolf", "Sorcerer"] for x in teams):
-            msg += "#狼人胜！"
+                k.win = True
+                if k.in_love:
+                    k.in_love.win = True
 
-        if "Sorcerer" in teams or "Wolf" in teams:
-            sorcerers = self.get_player_with_role(ROLES.Sorcerer)
-            for sorcerer in sorcerers:
-                if not sorcerer.dead:
-                    msg += f"清晨的雾气消散，{sorcerer.name}离开这个空无一人村庄，寻找下一个繁盛的村庄。 #暗黑法师胜\n"
+        if teams == WinType.NoOne:
+            survivor = [n for n in self.players.values() if not n.dead]
+            death_message = ""
+            if len(survivor) == 3:
+                doppelganger = self.get_survived_player_with_role(ROLES.Doppelganger)
+                thief = self.get_survived_player_with_role(ROLES.Thief)
+                sorc = self.get_survived_player_with_role(ROLES.Sorcerer)
 
-        if "Thief" in teams:
-            thieves = self.get_player_with_role(ROLES.Thief)
-            for thief in thieves:
-                if not thief.dead:
-                    f"👻小偷{thief.name} 离开了这个落后的小村庄，去追寻 诗和远方 （划去）..更好更多的职业。 #小偷胜\n"
+                if doppelganger and thief and sorc:
+                    death_message = f"清晨的雾气消散，🔮暗黑法师{sorc.name}，寻找下一个繁盛的村庄。 #暗黑法师胜\n" \
+                                    f"啊！一个连自己唯一的任务都无法完成的人，其生活能有多悲惨？夺取他人外表的能力只是一个传说吗？我们永远也不会知道！" \
+                                    "现在村子里只有一个人，没有人可以模仿。他们唯一能做的就是模仿镜子里的人！这就是他们的能力。 #替身胜\n" \
+                                    f"👻小偷{thief.name} 离开了这个落后的小村庄，去追寻 诗和远方 （划去）..更好更多的职业 #小偷胜"
+            elif len(survivor) == 2:
+                if any(n.role == ROLES.Tanner for n in survivor) and any(n.role in [
+                    ROLES.Sorcerer, ROLES.Thief, ROLES.Doppelganger
+                ] for n in survivor):
+                    sorc_thief_dg = [n for n in survivor if n.role in [ROLES.Sorcerer, ROLES.Thief, ROLES.Doppelganger]]
+                    tann = self.get_survived_player_with_role(ROLES.Tanner)
 
-        if "Tanner" in teams:
-            tanners = self.get_player_with_role(ROLES.Tanner)
-            for tanner in tanners:
-                if not tanner.dead:
-                    msg += f"胜利还是属于死亡，{tanner.name}在清晨的阳光中自己走入了烈火，世界最终会归尽。 #皮匠胜\n"
+                    if sorc_thief_dg and tann:
+                        sorc_thief_dg = sorc_thief_dg[0]
+                        if sorc_thief_dg.role == ROLES.Doppelganger:
+                            await sorc_thief_dg.process_dg()
+                            if sorc_thief_dg.role == ROLES.Tanner:
+                                await self.kill_player(sorc_thief_dg, KillMethod.Suicide, sorc_thief_dg, False)
+                                death_message += f"胜利还是属于死亡，{sorc_thief_dg.name} " \
+                                                 f"在清晨的阳光中走入了烈火，世界最终会归尽。 #👺皮匠胜。"
+                            else:
+                                death_message += f"啊！一个连自己唯一的任务都无法完成的人，其生活能有多悲惨？" \
+                                                 f"夺取他人外表的能力只是一个传说吗？我们永远也不会知道！" \
+                                                 "现在村子里只有一个人，没有人可以模仿。" \
+                                                 "他们唯一能做的就是模仿镜子里的人！这就是他们的能力。 #替身胜\n"
+                        else:
+                            if sorc_thief_dg.role == ROLES.Sorcerer:
+                                death_message += f"清晨的雾气消散，🔮暗黑法师{sorc_thief_dg.name}" \
+                                                 f"离开这个空无一人村庄，寻找下一个繁盛的村庄。"
+                            if sorc_thief_dg.role == ROLES.Thief:
+                                death_message += f"👻小偷{sorc_thief_dg.name}离开了这个落后的小村庄，" \
+                                                 f"去追寻 诗和远方 （划去）..更好更多的职业 #小偷胜"
+                            if sorc_thief_dg.role == ROLES.Doppelganger:
+                                death_message += f"啊！一个连自己唯一的任务都无法完成的人，其生活能有多悲惨？" \
+                                                 f"夺取他人外表的能力只是一个传说吗？我们永远也不会知道！" \
+                                                 "现在村子里只有一个人，没有人可以模仿。" \
+                                                 "他们唯一能做的就是模仿镜子里的人！这就是他们的能力。 #替身胜\n"
+                elif any(n.role == ROLES.Sorcerer for n in survivor) and any(n.role in [
+                    ROLES.Thief, ROLES.Doppelganger
+                ] for n in survivor):
+                    sorc = self.get_survived_player_with_role(ROLES.Sorcerer)
+                    thief_dg = [n for n in survivor if n.role in [ROLES.Thief, ROLES.Doppelganger]]
+                    if sorc and thief_dg:
+                        thief_dg = thief_dg[0]
+                        death_message = f"清晨的雾气消散，🔮暗黑法师{sorc.name}" \
+                                        f"离开这个空无一人村庄，寻找下一个繁盛的村庄。"
+                        if thief_dg.role == ROLES.Doppelganger:
+                            death_message += f"啊！一个连自己唯一的任务都无法完成的人，其生活能有多悲惨？" \
+                                             f"夺取他人外表的能力只是一个传说吗？我们永远也不会知道！" \
+                                             "现在村子里只有一个人，没有人可以模仿。" \
+                                             "他们唯一能做的就是模仿镜子里的人！这就是他们的能力。 #替身胜\n"
+                        else:
+                            death_message += f"👻小偷{thief_dg.name}离开了这个落后的小村庄，" \
+                                             f"去追寻 诗和远方 （划去）..更好更多的职业 #小偷胜"
+                if all(n.role in [ROLES.Doppelganger, ROLES.Thief] for n in survivor):
+                    thief = self.get_survived_player_with_role(ROLES.Thief)
+                    dg = self.get_survived_player_with_role(ROLES.Doppelganger)
 
-        if "Doppelganger" in teams:
-            msg += "啊！一个连自己唯一的任务都无法完成的人，其生活能有多悲惨？夺取他人外表的能力只是一个传说吗？我们永远也不会知道！" \
-                   "现在村子里只有一个人，没有人可以模仿。他们唯一能做的就是模仿镜子里的人！这就是他们的能力。 #替身胜\n"
+                    if dg and thief:
+                        death_message = f"👻小偷{thief.name}离开了这个落后的小村庄，" \
+                                         f"去追寻 诗和远方 （划去）..更好更多的职业 #小偷胜"
+                        death_message += f"啊！一个连自己唯一的任务都无法完成的人，其生活能有多悲惨？" \
+                                         f"夺取他人外表的能力只是一个传说吗？我们永远也不会知道！" \
+                                         "现在村子里只有一个人，没有人可以模仿。" \
+                                         "他们唯一能做的就是模仿镜子里的人！这就是他们的能力。 #替身胜\n"
 
     async def check_role_changes(self):
         aps = self.get_survived_player_with_role(ROLES.ApprenticeSeer)

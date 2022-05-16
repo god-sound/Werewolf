@@ -3,7 +3,7 @@ from enum import Enum, unique
 
 @unique
 class WinType(Enum):
-    Village = 0
+    Villager = 0
     Cult = 1
     Wolf = 2
     Tanner = 3
@@ -11,6 +11,10 @@ class WinType(Enum):
     SerialKiller = 5
     Lovers = 6
     SKHunter = 7
+    NoOne = 8
+    Arsonist = 9
+    Doppelganger = 10
+    Sorcerer = 11
 
 
 @unique
