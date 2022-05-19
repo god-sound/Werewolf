@@ -15,7 +15,7 @@ __all__ = (
 from qq.ext import commands
 from qq.utils import MISSING, get
 
-from cogs.werewolf.enum import WinType, KillMethod
+from cogs.werewolf.enum import WinType, KillMethod, QuestionType
 from cogs.werewolf.roles import ROLES, Role
 
 WOLF_ROLES = [ROLES.Wolf, ROLES.AlphaWolf, ROLES.WolfCub, ROLES.Lycan]
@@ -34,11 +34,16 @@ class Player:
         self.in_love: Optional[Player] = MISSING
         self.session: Session = session
         self.changed_role_count = 0
-        self.time_died: Optional[int] = MISSING
+        self.time_died: Optional[int] = 0
+        self.bullet: int = 2
+        self.current_questions: Optional[str] = None
+        self.choice: int = 0
+        self.drunk: bool = False
         self.kill_by_role: Optional[Role] = MISSING
         self.kill_method: Optional[KillMethod] = MISSING
         self.final_shot_delay: Optional[KillMethod] = MISSING
         self.converted_to_cult: bool = False
+        self.flee: bool = False
 
     def __repr__(self):
         return f'<Player member={self.member}, role={self.role}, cult_leader={self.cult_leader}>'
@@ -128,6 +133,7 @@ class Setting:
     disabled_role: int = 0
     burning_overkill: bool = True
     thief_full: bool = False
+    night_time: int = 120
 
 
 class Session:
@@ -146,12 +152,15 @@ class Session:
         self.is_running: bool = False
         self.force_start: bool = False
         self.wolf_cub_killed: bool = True
+        self.sandman_sleep: bool = False
+        self.silver_spread: bool = False
         self.join_time: int = 120
         self.setting: Setting = Setting()
         self.chaos: bool = chaos
         self.day: int = 0
         self.night: bool = True
         self.end_time: Optional[datetime.datetime] = MISSING
+        self.start_time: Optional[datetime.datetime] = MISSING
 
     def join(self, player: Union[qq.Member, Player]):
         if not isinstance(player, Player):
@@ -178,6 +187,7 @@ class Session:
             else:
                 break
         self.is_joining = False
+        self.start_time = datetime.datetime.now()
 
         await asyncio.sleep(2)
         if self.player_count < self.setting.min_players:
@@ -194,8 +204,46 @@ class Session:
 
     async def night_loop(self):
         self.night = True
-        if not self.is_running or self.check_game_end():
+        if not self.is_running or self.check_game_end(True):
             return
+        for p in self.players.values():
+            p.choice = 0
+            p.choice2 = 0
+            p.current_question = MISSING
+            p.votes = 0
+            p.died_last_night = False
+            p.being_visited_same_night_count = 0
+            if p.bitten:
+                p.bitten = False
+                if not p.dead and p.role not in WOLF_ROLES + ROLES.SnowWolf:
+                    if p.role == ROLES.Cultist:
+                        for cultist in [n for n in self.alive_players if n.role == ROLES.Cultist]:
+                            await cultist.member.send(f"奇怪，当你们决定今晚让谁入会时，邪教徒{p.name}好像不在家。")
+                    p.role = ROLES.Wolf
+                    await p.member.send("现在你已经是🐺狼人了!")
+                    wolfs = self.get_survived_player_with_roles(WOLF_ROLES + ROLES.SnowWolf)
+                    await p.member.send("当前狼群:" + ', '.join([n.name for n in wolfs]))
+                    await self.check_role_changes()
+        if self.check_game_end():
+            return
+        night_time = self.setting.night_time
+        if self.sandman_sleep:
+            self.sandman_sleep = False
+            self.silver_spread = False
+            self.wolf_cub_killed = False
+            for player in self.players:
+                player.drunk = False
+            await self.ctx.send(
+                "💤奇怪，天怎么突然这么黑，好像也停电了，火也点不燃，该回家睡觉了"
+                "，今晚注定是个宁静的夜晚。今晚没有人会活动"
+            )
+            return
+
+        await self.ctx.send(
+            "夜幕降临，人们都活在恐惧中，彻夜难眠。这漫长的夜晚竟然有 %s 秒！\n"
+            "请所有夜晚（主动）行动的角色，私聊机器人以使用自己能力。" % night_time
+        )
+        await self.ctx.send(self.player_list_string)
 
     async def check_game_end(self, check_bitten=False):
         if self.is_running:
@@ -333,6 +381,42 @@ class Session:
             if hunter_final_shot and kill_method:
                 await self.hunter_final_shot(p, kill_method, delay=is_night)
                 pass
+
+    async def send_night_action(self):
+        if not self.players:
+            return
+        for p in self.players.values():
+            p.current_questions = None
+            p.choice = 0
+            msg = ""
+            target_base = [n for n in self.players.values() if not n.dead and not n.drunk]
+            if p.role is ROLES.SerialKiller:
+                targets = target_base
+                msg = "今晚你想杀掉谁？"
+                q_type = QuestionType.SerialKill
+            elif p.role is ROLES.Harlot:
+                targets = target_base
+                msg = "你打算去谁家？"
+                q_type = QuestionType.Visit
+            elif p.role in [ROLES.Fool, ROLES.Seer, ROLES.Sorcerer, ROLES.Oracle]:
+                targets = target_base
+                msg = "你想占卜谁的身份？"
+                q_type = QuestionType.See
+            elif p.role is ROLES.GuardianAngel:
+                targets = target_base
+                msg = "你想守护谁？"
+                q_type = QuestionType.Guard
+            elif p.role in WOLF_ROLES:
+                if self.silver_spread:
+                    break
+                targets = [n for n in target_base if n.role not in WOLF_ROLES and n.role != ROLES.SnowWolf]
+                other = self.get_survived_player_with_roles(WOLF_ROLES)
+                msg = "你想要吃掉谁？\n" + "请确定你已与 %s 商量。" % ", ".join([n.name for n in other])
+                q_type = QuestionType.Kill
+            elif p.role is ROLES.Cultist:
+                targets = [n for n in target_base if n.role != ROLES.Cultist]
+                other = self.get_survived_player_with_roles([ROLES.Cultist])
+                msg = "你想为谁施洗？"
 
     async def hunter_final_shot(self, hunter: Player, kill_method: KillMethod, delay: bool = False):
         if delay:
@@ -497,11 +581,90 @@ class Session:
 
                     if dg and thief:
                         death_message = f"👻小偷{thief.name}离开了这个落后的小村庄，" \
-                                         f"去追寻 诗和远方 （划去）..更好更多的职业 #小偷胜"
+                                        f"去追寻 诗和远方 （划去）..更好更多的职业 #小偷胜"
                         death_message += f"啊！一个连自己唯一的任务都无法完成的人，其生活能有多悲惨？" \
                                          f"夺取他人外表的能力只是一个传说吗？我们永远也不会知道！" \
                                          "现在村子里只有一个人，没有人可以模仿。" \
                                          "他们唯一能做的就是模仿镜子里的人！这就是他们的能力。 #替身胜\n"
+            elif len(survivor) == 1:
+                survivor = survivor[0]
+                if survivor.role is ROLES.Tanner:
+                    await self.kill_player(survivor, KillMethod.Suicide, survivor, False)
+                    death_message = f"胜利还是属于死亡，{survivor.name} " \
+                                    f"在清晨的阳光中走入了烈火，世界最终会归尽。 #👺皮匠胜。"
+                elif survivor.role is ROLES.Sorcerer:
+                    death_message = f"清晨的雾气消散，🔮暗黑法师{survivor.name}" \
+                                    f"离开这个空无一人村庄，寻找下一个繁盛的村庄。"
+                elif survivor.role is ROLES.Thief:
+                    death_message = f"👻小偷{survivor.name}离开了这个落后的小村庄，" \
+                                    f"去追寻 诗和远方 （划去）..更好更多的职业 #小偷胜"
+                elif survivor.role is ROLES.Doppelganger:
+                    death_message = f"啊！一个连自己唯一的任务都无法完成的人，其生活能有多悲惨？" \
+                                    f"夺取他人外表的能力只是一个传说吗？我们永远也不会知道！" \
+                                    "现在村子里只有一个人，没有人可以模仿。" \
+                                    "他们唯一能做的就是模仿镜子里的人！这就是他们的能力。 #替身胜\n"
+            death_message += "所有人都死了。这届人类不行啊。 #无人胜 #空城"
+            await self.ctx.send(death_message)
+        elif teams == WinType.Wolf:
+            msg += "#狼人胜！ 看来这届村民不行啊！"
+            await self.ctx.send(msg)
+        elif teams == WinType.Tanner:
+            msg += "糟糕！你们竟然昏了头脑把皮匠公审了！#皮匠胜。"
+            await self.ctx.send(msg)
+        elif teams == WinType.Arsonist:
+            if len(self.alive_players) > 1:
+                alive = self.alive_players
+                other = [n for n in alive if n.role != ROLES.Arsonist][0]
+                arsonist = [n for n in alive if n.role == ROLES.Arsonist][0]
+                msg = f"只剩🔥纵火犯 {arsonist.name}和 {other.name} ... " \
+                      f"突然 {arsonist.name} 笑起来, 划了一根火柴，" \
+                      f"丢向了了 {other.name}，{other.name} 瞬间燃烧起来了... \n"
+                other.dead = True
+                other.time_died = self.day
+            msg += "最后，除了🔥纵火犯的家，村子里只剩一片火海。#纵火犯胜..."
+            await self.ctx.send(msg)
+        elif teams == WinType.Cult:
+            msg += "次日清晨，所有人👤邪教徒走上街头，最后一个人也受洗成为👤邪教徒 —— #邪教徒胜！"
+            await self.ctx.send(msg)
+        elif teams == WinType.SerialKiller:
+            if len(self.alive_players) > 1:
+                alive = self.alive_players
+                other = [n for n in alive if n.role != ROLES.SerialKiller][0]
+                sk = [n for n in alive if n.role == ROLES.SerialKiller][0]
+                msg = f"这天早上，剩下的两个市民走到广场中央，🔪变态杀人狂 {sk.name} 看了一眼 {other.name} ，" \
+                      f"脸上露出邪恶的笑容，「唰！」的一声抽出一把匕首，手起刀落，只见 {other.name} 已倒下。" \
+                      f"整个城市只剩下 {sk.name} 是活着的…… #杀人狂胜"
+                other.dead = True
+                other.time_died = self.day
+            msg += "唯一活着的竟然是🔪变态杀人狂！！ #杀人魔胜"
+            await self.ctx.send(msg)
+        elif teams == WinType.Lovers:
+            msg += "胜利属于爱神！ #情侣胜！"
+            await self.ctx.send(msg)
+        elif teams == WinType.SKHunter:
+            h = [n for n in self.alive_players if n.role == ROLES.Hunter]
+            sk = [n for n in self.alive_players if n.role == ROLES.SerialKiller]
+            msg += "所有人都死了。这届人类不行啊。 #无人胜 #空城"
+            if sk:
+                await self.kill_player(sk[0], KillMethod.HunterCult, h[0], False)
+                if h:
+                    await self.kill_player(sk[0], KillMethod.HunterCult, h[0], False)
+                    msg += f"曙光乍现， {sk[0].name} 和 {h[0].name} 并排前行，忽然🔪变态杀人狂 {sk[0].name} 拔出了匕首，" \
+                           f"跳到 {h[0].name} 身上，把匕首狠狠刺入 {h[0].name} 胸部的同时，猎人 {h[0].name} 也反应迅敏地拔出枪，" \
+                           f"对着 {sk[0].name} 的脸就是一枪，把 {sk[0].name} 的头打爆了。\n {h[0].name} 也好不到哪儿去，" \
+                           f"匕首已经刺穿了他的心脏……最后两人都死了……\n这就是传说中的相爱相杀？ #空城"
+            await self.ctx.send(msg)
+        else:
+            msg += "#人类胜！ "
+            await self.ctx.send(msg)
+        survivor = self.alive_players
+        msg = f"幸存者们: {len(survivor)}/{len(self.players)}"
+        for p in sorted(self.players.values(), key=lambda a: a.time_died):
+            msg += f"{p.member.mention}: {'❌ 死亡' if p.dead else '✅ 存活'}{'(🏳️ 已逃跑)' if p.flee else ''}"
+            msg += f"{'❤️' if p.in_love else ''} {'胜利' if p.win else '失败'}\n"
+        time_played = self.start_time - self.end_time
+        msg += f"游戏进行了：{time_played}"
+        await self.ctx.send(msg)
 
     async def check_role_changes(self):
         aps = self.get_survived_player_with_role(ROLES.ApprenticeSeer)
@@ -524,9 +687,13 @@ class Session:
         else:
             return None
 
+    def get_survived_player_with_roles(self, roles: List[Role]) -> List[Player]:
+        players = [n for n in self.players.values() if n.role in roles and not n.dead]
+        return players if players else []
+
     def get_player_with_role(self, role: Role) -> List[Player]:
         players = [n for n in self.players.values() if n.role is role]
-        return players if players else [None]
+        return players if players else []
 
     def get_player_with_roles(self, roles: List[Role]) -> List[Player]:
         players = [n for n in self.players.values() if n.role in roles]
