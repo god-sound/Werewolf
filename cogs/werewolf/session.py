@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import random
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Optional, Union, TYPE_CHECKING
 
 import qq
 
@@ -17,6 +17,9 @@ from qq.utils import MISSING, get
 
 from cogs.werewolf.enum import WinType, KillMethod, QuestionType
 from cogs.werewolf.roles import ROLES, Role
+
+if TYPE_CHECKING:
+    from cogs.werewolf import Werewolf
 
 WOLF_ROLES = [ROLES.Wolf, ROLES.AlphaWolf, ROLES.WolfCub, ROLES.Lycan]
 
@@ -44,6 +47,8 @@ class Player:
         self.final_shot_delay: Optional[KillMethod] = MISSING
         self.converted_to_cult: bool = False
         self.flee: bool = False
+        self.used_ability: bool = False
+        self.doused: bool = False
 
     def __repr__(self):
         return f'<Player member={self.member}, role={self.role}, cult_leader={self.cult_leader}>'
@@ -141,8 +146,10 @@ class Session:
     def __init__(
             self,
             ctx: commands.Context,
-            chaos: bool
+            chaos: bool,
+            cog: Werewolf
     ):
+        self.cog = cog
         self.channel = ctx.channel
         self.guild = ctx.guild
         self.ctx = ctx
@@ -389,6 +396,8 @@ class Session:
             p.current_questions = None
             p.choice = 0
             msg = ""
+            targets = []
+            q_type = QuestionType.Trouble
             target_base = [n for n in self.players.values() if not n.dead and not n.drunk]
             if p.role is ROLES.SerialKiller:
                 targets = target_base
@@ -416,7 +425,66 @@ class Session:
             elif p.role is ROLES.Cultist:
                 targets = [n for n in target_base if n.role != ROLES.Cultist]
                 other = self.get_survived_player_with_roles([ROLES.Cultist])
-                msg = "你想为谁施洗？"
+                msg = "你想为谁施洗？\n" + "请确定你已与 %s 商量。" % ", ".join([n.name for n in other])
+                q_type = QuestionType.Convert
+            elif p.role is ROLES.CultistHunter:
+                targets = target_base
+                msg = "你想审判谁？"
+                q_type = QuestionType.Hunt
+            elif p.role is ROLES.WildChild:
+                if self.day == 1:
+                    targets = target_base
+                    msg = "你想成为谁的追随者？"
+                    q_type = QuestionType.RoleModel
+                else:
+                    p.choice = -1
+            elif p.role is ROLES.Doppelganger:
+                if self.day == 1:
+                    targets = target_base
+                    msg = "你希望哪个玩家死后，自己可以变成他？"
+                    q_type = QuestionType.RoleModel
+                else:
+                    p.choice = -1
+            elif p.role is ROLES.Cupid:
+                if self.day == 1:
+                    targets = target_base
+                    msg = "你想让哪两个玩家成为情侣？请选择第一个玩家"
+                    q_type = QuestionType.Lover1
+                else:
+                    p.choice = -1
+            elif p.role is ROLES.Thief:
+                if self.day == 1 or self.setting.thief_full:
+                    targets = target_base
+                    msg = "你想偷谁的能力?"
+                    q_type = QuestionType.Thief
+                else:
+                    p.choice = -1
+            elif p.role is ROLES.Chemist:
+                if p.used_ability:
+                    targets = target_base
+                    msg = "今晚你想和谁进行博弈？"
+                    q_type = QuestionType.Chemistry
+                else:
+                    p.used_ability = False
+                    p.choice = -1
+                    await p.member.send("夜深人静，疯狂的化学家开始制药了，希望不被人发现。")
+            elif p.role is ROLES.SnowWolf:
+                if not self.silver_spread:
+                    targets = target_base
+                    msg = "你想冻结谁的能力？"
+                    q_type = QuestionType.Freeze
+            elif p.role is ROLES.Arsonist:
+                targets = [n for n in target_base if not n.doused]
+                msg = "今天你想浇汽油，还是放一把火，烧掉你曾经浇过汽油的房子？"
+                q_type = QuestionType.Douse
+            else:
+                continue
+
+            if p.drunk or not msg:
+                p.choice = -1
+                continue
+
+            await self.cog.send_menu([n.name for n in targets], targets, p.member, msg, q_type)
 
     async def hunter_final_shot(self, hunter: Player, kill_method: KillMethod, delay: bool = False):
         if delay:
