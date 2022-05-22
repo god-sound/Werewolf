@@ -66,7 +66,11 @@ class Player:
 
     async def process_aps(self):
         if not self.dead:
-            seer = self.session.get_player_with_role(ROLES.Seer)[0]
+            seers = self.session.get_player_with_role(ROLES.Seer)
+            if seers:
+                seer = seers[0]
+            else:
+                return
             if seer.dead:
                 self.role = ROLES.Seer
                 self.changed_role_count += 1
@@ -89,7 +93,7 @@ class Player:
             )
 
     async def process_dg(self):
-        if not self.dead and self.role_model.dead:
+        if not self.dead and self.role_model and self.role_model.dead:
             self.role = self.role_model.role
             self.changed_role_count += 1
             if self.role is ROLES.Mason:
@@ -133,8 +137,8 @@ class Player:
 
 
 class Setting:
-    min_players: int = 8
-    game_join_time: int = 120
+    min_players: int = 0
+    game_join_time: int = 20
     disabled_role: int = 0
     burning_overkill: bool = True
     thief_full: bool = False
@@ -161,8 +165,8 @@ class Session:
         self.wolf_cub_killed: bool = True
         self.sandman_sleep: bool = False
         self.silver_spread: bool = False
-        self.join_time: int = 120
         self.setting: Setting = Setting()
+        self.join_time: int = self.setting.game_join_time
         self.chaos: bool = chaos
         self.day: int = 0
         self.night: bool = True
@@ -208,10 +212,11 @@ class Session:
         while self.is_running:
             self.day += 1
             await self.check_role_changes()
+            await self.night_loop()
 
     async def night_loop(self):
         self.night = True
-        if not self.is_running or self.check_game_end(True):
+        if not self.is_running or await self.check_game_end(True):
             return
         for p in self.players.values():
             p.choice = 0
@@ -231,7 +236,7 @@ class Session:
                     wolfs = self.get_survived_player_with_roles(WOLF_ROLES + ROLES.SnowWolf)
                     await p.member.send("当前狼群:" + ', '.join([n.name for n in wolfs]))
                     await self.check_role_changes()
-        if self.check_game_end():
+        if await self.check_game_end():
             return
         night_time = self.setting.night_time
         if self.sandman_sleep:
@@ -251,38 +256,40 @@ class Session:
             "请所有夜晚（主动）行动的角色，私聊机器人以使用自己能力。" % night_time
         )
         await self.ctx.send(self.player_list_string)
+        await asyncio.sleep(night_time)
 
     async def check_game_end(self, check_bitten=False):
-        if self.is_running:
+        if not self.is_running:
             return True
         survivor = self.alive_players
         if all(n.role not in WOLF_ROLES for n in survivor):
             if not check_bitten or all(not n.bitten for n in survivor):
-                return False
-            snow_wolf = self.get_survived_player_with_role(ROLES.SnowWolf)
-            if snow_wolf:
-                snow_wolf.role = ROLES.Wolf
-                snow_wolf.changed_role_count += 1
-                await snow_wolf.member.send("你似乎是最后的狼了，为了生存，你不得不变成了只普通🐺狼人。")
+                snow_wolf = self.get_survived_player_with_role(ROLES.SnowWolf)
+                if snow_wolf:
+                    snow_wolf.role = ROLES.Wolf
+                    snow_wolf.changed_role_count += 1
+                    await snow_wolf.member.send("你似乎是最后的狼了，为了生存，你不得不变成了只普通🐺狼人。")
+                else:
+                    traitor = self.get_survived_player_with_role(ROLES.Traitor)
+                    if traitor:
+                        traitor.role = ROLES.Wolf
+                        traitor.changed_role_count += 1
+                        await traitor.member.send("现在你已经成为狼人了，你这个叛徒！！！")
             else:
-                traitor = self.get_survived_player_with_role(ROLES.Traitor)
-                if traitor:
-                    traitor.role = ROLES.Wolf
-                    traitor.changed_role_count += 1
-                    await traitor.member.send("现在你已经成为狼人了，你这个叛徒！！！")
+                return False
         if not survivor:
-            return self.end(WinType.NoOne)
+            return await self.end(WinType.NoOne)
         elif len(survivor) == 1:
             p = survivor[0]
             if p.role in [ROLES.Tanner, ROLES.Sorcerer, ROLES.Thief, ROLES.Doppelganger]:
-                return self.end(WinType.NoOne)
+                return await self.end(WinType.NoOne)
             else:
-                return self.end(p.role.party)
+                return await self.end(p.role.party)
         elif len(survivor) == 2:
             if all(n.in_love for n in survivor):
                 return await self.end(WinType.Lovers)
             if all(n in [ROLES.Tanner, ROLES.Sorcerer, ROLES.Thief, ROLES.Doppelganger] for n in survivor):
-                return self.end(WinType.NoOne)
+                return await self.end(WinType.NoOne)
             if any(n.role is ROLES.Hunter for n in survivor):
                 other = [n for n in survivor if n.role != ROLES.Hunter]
                 if not other:
@@ -305,9 +312,9 @@ class Session:
                         )
                         return await self.end(WinType.Wolf)
             if any(n.role is ROLES.SerialKiller for n in survivor):
-                return self.end(WinType.SerialKiller)
+                return await self.end(WinType.SerialKiller)
             if any(n.role is ROLES.Arsonist for n in survivor):
-                return self.end(WinType.Arsonist)
+                return await self.end(WinType.Arsonist)
             if any(n.role is ROLES.Cultist for n in survivor):
                 other = [n for n in survivor if n.role != ROLES.Cultist]
                 if not other:
@@ -315,7 +322,7 @@ class Session:
                 else:
                     other = other[0]
                 if other.role in WOLF_ROLES:
-                    return self.end(WinType.Wolf)
+                    return await self.end(WinType.Wolf)
                 if other.role is ROLES.CultistHunter:
                     cultist = get(survivor, role=ROLES.Cultist)
                     await cultist.member.send(
@@ -323,18 +330,18 @@ class Session:
                         f"可惜 {cultist.name} 最后的邪教仪式，还是被 {other.name} 发现了... #村民胜 "
                     )
                     await self.kill_player(cultist, KillMethod.HunterCult, other)
-                    return self.end(WinType.Villager)
+                    return await self.end(WinType.Villager)
                 other.converted_to_cult = True
                 other.role = ROLES.Cultist
-                return self.end(WinType.Cult)
+                return await self.end(WinType.Cult)
         elif len(survivor) == 3:
             if all(n in [ROLES.Tanner, ROLES.Sorcerer, ROLES.Thief, ROLES.Doppelganger] for n in survivor):
-                return self.end(WinType.NoOne)
+                return await self.end(WinType.NoOne)
 
         if any(n.role.party in [ROLES.SerialKiller, ROLES.Arsonist] for n in survivor):
             return False
         if all(x.role.party == ROLES.Cultist for x in survivor):
-            return self.end(WinType.Cult)
+            return await self.end(WinType.Cult)
 
         wolfs = [n for n in survivor if n.role in ROLES.Wolf]
         others = [n for n in survivor if n.role not in ROLES.Wolf]
@@ -348,14 +355,14 @@ class Session:
                     )
             ):
                 return False
-            return self.end(WinType.Wolf)
+            return await self.end(WinType.Wolf)
         if all(
                 n.role not in [
                     ROLES.SnowWolf, ROLES.Cultist, ROLES.SerialKiller, ROLES.Arsonist
                 ] + WOLF_ROLES for n in survivor
         ):
             if not check_bitten or all(n.bitten for n in survivor):
-                return self.end(WinType.Villager)
+                return await self.end(WinType.Villager)
         return False
 
     async def kill_player(
@@ -726,11 +733,11 @@ class Session:
             msg += "#人类胜！ "
             await self.ctx.send(msg)
         survivor = self.alive_players
-        msg = f"幸存者们: {len(survivor)}/{len(self.players)}"
+        msg = f"幸存者们: {len(survivor)}/{len(self.players)}\n"
         for p in sorted(self.players.values(), key=lambda a: a.time_died):
             msg += f"{p.member.mention}: {'❌ 死亡' if p.dead else '✅ 存活'}{'(🏳️ 已逃跑)' if p.flee else ''}"
             msg += f"{'❤️' if p.in_love else ''} {'胜利' if p.win else '失败'}\n"
-        time_played = self.start_time - self.end_time
+        time_played = self.end_time - self.start_time
         msg += f"游戏进行了：{time_played}"
         await self.ctx.send(msg)
 
@@ -774,8 +781,6 @@ class Session:
 
     @property
     def player_list_string(self) -> str:
-        if not self.is_joining:
-            return ""
         players = "\n".join([m.member.mention for n, m in self.players.items()])
         return f'玩家: {self.player_count}\n{players}'
 

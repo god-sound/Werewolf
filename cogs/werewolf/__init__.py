@@ -10,7 +10,7 @@ from cogs.werewolf.session import Session
 
 
 class Werewolf(commands.Cog):
-    def __int__(self, bot: commands.Bot):
+    def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.sessions: Dict[int, Session] = {}
         self.active_questions: Dict[int, (QuestionType, List)] = {}
@@ -47,3 +47,7 @@ class Werewolf(commands.Cog):
         await ctx.reply(sessions.player_list_string)
         await sessions.main_game_loop()
         self.sessions.pop(ctx.guild.id)
+
+
+def setup(bot):
+    bot.add_cog(Werewolf(bot))

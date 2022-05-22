@@ -2,7 +2,7 @@ from enum import Enum, unique
 
 
 @unique
-class QuestionType:
+class QuestionType(Enum):
     Lynch = 0
     Kill = 1
     Visit = 2
